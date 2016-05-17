@@ -41,8 +41,10 @@ standard_column_names = {
     6 : ["II", "IQ", "IU", "QQ", "QU", "UU"]
 }
 
+
 class HealpixFitsWarning(Warning):
     pass
+
 
 def writeto(tbhdu, filename):
     # FIXME: Pyfits versions earlier than 3.1.2 had no support or flaky support
@@ -65,6 +67,7 @@ def writeto(tbhdu, filename):
     else:
         tbhdu.writeto(filename, clobber=True)
 
+
 def read_cl(filename, dtype=np.float64, h=False):
     """Reads Cl from an healpix file, as IDL fits2cl.
 
@@ -86,6 +89,7 @@ def read_cl(filename, dtype=np.float64, h=False):
         return cl[0]
     else:
         return cl
+
 
 def write_cl(filename, cl, dtype=np.float64):
     """Writes Cl into an healpix file, as IDL cl2fits.
@@ -114,7 +118,10 @@ def write_cl(filename, cl, dtype=np.float64):
     tbhdu.header['CREATOR'] = 'healpy'
     writeto(tbhdu, filename)
 
-def write_map(filename,m,nest=False,dtype=np.float32,fits_IDL=True,coord=None,partial=False,column_names=None,column_units=None,extra_header=()):
+
+def write_map(filename, m, nest=False, dtype=np.float32, fits_IDL=True,
+              coord=None, partial=False, column_names=None, column_units=None,
+              extra_header=()):
     """Writes an healpix map into an healpix file.
 
     Parameters
@@ -247,9 +254,9 @@ def write_map(filename,m,nest=False,dtype=np.float32,fits_IDL=True,coord=None,pa
     writeto(tbhdu, filename)
 
 
-def read_map(filename,field=0,dtype=np.float64,nest=False,partial=False,hdu=1,h=False,
-             verbose=True,memmap=False):
-    """Read an healpix map from a fits file.  Partial-sky files,
+def read_map(filename, field=0, dtype=np.float64, nest=False, partial=False,
+             sparse=False, hdu=1, h=False, verbose=True, memmap=False):
+    """Read an healpix map from a fits file. Partial-sky files,
     if properly identified, are expanded to full size and filled with UNSEEN.
 
     Parameters
@@ -272,14 +279,21 @@ def read_map(filename,field=0,dtype=np.float64,nest=False,partial=False,hdu=1,h=
       use fits keyword ORDERING to decide whether conversion is needed or not
       If None, no conversion is performed.
     partial : bool, optional
-      If True, fits file is assumed to be a partial-sky file with explicit indexing,
-      if the indexing scheme cannot be determined from the header.
+      If True, fits file is assumed to be a partial-sky file with explicit
+      indexing, if the indexing scheme cannot be determined from the header.
       If False, implicit indexing is assumed.  Default: False.
       A partial sky file is one in which OBJECT=PARTIAL and INDXSCHM=EXPLICIT,
       and the first column is then assumed to contain pixel indices.
       A full sky file is one in which OBJECT=FULLSKY and INDXSCHM=IMPLICIT.
       At least one of these keywords must be set for the indexing
       scheme to be properly identified.
+      Note that this parameter has a lower priority than the OBJECT header card
+      and is only used as fallback when the headers are not properly set.
+    sparse : bool, optional
+      If True, returns a `pandas.Series` object or a tuple of these, which are
+      sparse unidimensional arrays. Useful only if you're reading partial-sky
+      files with a high resolution and very few values, to save up on memory.
+      You'll need the `pandas` library for this to work. Default: False.
     hdu : int, optional
       the header number to look at (start at 0)
     h : bool, optional
@@ -314,10 +328,10 @@ def read_map(filename,field=0,dtype=np.float64,nest=False,partial=False,hdu=1,h=
                       "assume %s"%ordering)
     if verbose: print('ORDERING = {0:s} in fits file'.format(ordering))
 
-    sz=pixelfunc.nside2npix(nside)
+    sz = pixelfunc.nside2npix(nside)
     ret = []
 
-    # partial sky: check OBJECT, then INDXSCHM
+    # Detect whether the file is partial sky or not: check OBJECT
     obj = fits_hdu.header.get('OBJECT', 'UNDEF').strip()
     if obj != 'UNDEF':
         if obj == 'PARTIAL':
@@ -325,6 +339,7 @@ def read_map(filename,field=0,dtype=np.float64,nest=False,partial=False,hdu=1,h=
         elif obj == 'FULLSKY':
             partial = False
 
+    # ... then check INDXSCHM
     schm = fits_hdu.header.get('INDXSCHM', 'UNDEF').strip()
     if schm != 'UNDEF':
         if schm == 'EXPLICIT':
@@ -339,7 +354,7 @@ def read_map(filename,field=0,dtype=np.float64,nest=False,partial=False,hdu=1,h=
     if schm == 'UNDEF':
         schm = (partial and 'EXPLICIT' or 'IMPLICIT')
         warnings.warn("No INDXSCHM keyword in header file : "
-                       "assume {}".format(schm))
+                      "assume {}".format(schm))
     if verbose:
         print('INDXSCHM = {0:s}'.format(schm))
 
@@ -366,39 +381,90 @@ def read_map(filename,field=0,dtype=np.float64,nest=False,partial=False,hdu=1,h=
 
     for ff, curr_dtype in zip(field, dtype):
         try:
-            m=fits_hdu.data.field(ff).astype(curr_dtype).ravel()
+            m = fits_hdu.data.field(ff).astype(curr_dtype).ravel()
         except pf.VerifyError as e:
             print(e)
             print("Trying to fix a badly formatted header")
-            m=fits_hdu.verify("fix")
-            m=fits_hdu.data.field(ff).astype(curr_dtype).ravel()
+            fits_hdu.verify("fix")
+            m = fits_hdu.data.field(ff).astype(curr_dtype).ravel()
 
         if partial:
-            mnew = UNSEEN * np.ones(sz, dtype=curr_dtype)
-            mnew[pix] = m
+            if sparse:
+                try:
+                    from sparse_vector import SparseVector
+                    import pandas
+                    from scipy.sparse import csc_matrix, lil_matrix
+                except ImportError:
+                    raise ImportError("You need the `pandas` library in order "
+                                      "to use the `sparse=True` feature.\n"
+                                      "Try: pip install pandas")
+
+                mnew = SparseVector((pix, m), size=sz, default_value=UNSEEN)
+
+
+                # mnew = pandas.Series(m, index=pix)
+                # pandas.SparseList()
+                # pandas.SparseArray()
+
+                # spindex = pandas.Int64Index()
+                # mnew = pandas.SparseArray(m, sparse_index=pix, fill_value=UNSEEN, dtype=curr_dtype)
+
+                # assert len(pix) == len(m)
+                # mnew = lil_matrix(
+                #     (m, (np.zeros(len(m)), pix)),  # data, (rowinds, colsinds)
+                #     shape=(1, sz),
+                #     dtype=curr_dtype
+                # )
+                #
+                # print("hey")
+                # print(mnew[0, pix])
+
+                # print(UNSEEN)
+                # repr(UNSEEN)
+
+                # assert mnew.getnnz() == sz
+                # assert mnew.size == sz
+                # mnew[0][pix] = m
+
+            else:
+                mnew = UNSEEN * np.ones(sz, dtype=curr_dtype)
+                mnew[pix] = m
             m = mnew
 
-        if (not pixelfunc.isnpixok(m.size) or (sz>0 and sz != m.size)) and verbose:
-            print('nside={0:d}, sz={1:d}, m.size={2:d}'.format(nside,sz,m.size))
-            raise ValueError('Wrong nside parameter.')
-        if not nest is None: # no conversion with None
+        # if (not pixelfunc.isnpixok(m.size) or (sz > 0 and sz != m.size)) and verbose:
+        #     print('nside={0:d}, sz={1:d}, m.size={2:d}'.format(nside,sz,m.size))
+        #     raise ValueError('Wrong nside parameter.')
+
+        if nest is not None:  # no conversion with None
             if nest and ordering == 'RING':
                 idx = pixelfunc.nest2ring(nside,np.arange(m.size,dtype=np.int32))
                 m = m[idx]
+                # if sparse:
+                #     m = m[0, idx]
+                # else:
+                #     pass
                 if verbose: print('Ordering converted to NEST')
             elif (not nest) and ordering == 'NESTED':
                 idx = pixelfunc.ring2nest(nside,np.arange(m.size,dtype=np.int32))
                 m = m[idx]
+                # if sparse:
+                #     m = m[0, idx]
+                # else:
+                #     pass
                 if verbose: print('Ordering converted to RING')
         try:
-            m[pixelfunc.mask_bad(m)] = UNSEEN
+            if sparse:
+                pass
+                # m[0, pixelfunc.mask_bad(m)] = UNSEEN
+            else:
+                m[pixelfunc.mask_bad(m)] = UNSEEN
         except OverflowError:
             pass
         ret.append(m)
 
     if len(ret) == 1:
         if h:
-            return ret[0],fits_hdu.header.items()
+            return ret[0], fits_hdu.header.items()
         else:
             return ret[0]
     else:
@@ -438,7 +504,7 @@ def write_alm(filename,alms,out_dtype=None,lmax=-1,mmax=-1,mmax_in=-1):
         alms = [alms]
 
     l2max = Alm.getlmax(len(alms[0]),mmax=mmax_in)
-    if (lmax != -1 and lmax > l2max):
+    if lmax != -1 and lmax > l2max:
         raise ValueError("Too big lmax in parameter")
     elif lmax == -1:
         lmax = l2max
@@ -481,6 +547,7 @@ def write_alm(filename,alms,out_dtype=None,lmax=-1,mmax=-1,mmax_in=-1):
         hdulist.append(tbhdu)
     writeto(tbhdu, filename)
 
+
 def read_alm(filename,hdu=1,return_mmax=False):
     """Read alm from a fits file.
 
@@ -519,7 +586,8 @@ def read_alm(filename,hdu=1,return_mmax=False):
     else:
         return alm
 
-## Generic functions to read and write column of data in fits file
+
+# Generic functions to read and write column of data in fits file
 
 def _get_hdu(input_data, hdu=None, memmap=None):
     """
@@ -542,7 +610,7 @@ def _get_hdu(input_data, hdu=None, memmap=None):
 
     if isinstance(input_data, pf.HDUList):
         if isinstance(hdu, int) and hdu >= len(input_data):
-            raise ValueError('Available hdu in [0-%d]' % len(hdulist))
+            raise ValueError('Available hdu in [0-%d]' % len(input_data))
         else:
             fits_hdu = input_data[hdu]
     elif isinstance(input_data, (pf.PrimaryHDU, pf.ImageHDU, pf.BinTableHDU, pf.TableHDU, pf.GroupsHDU)):
@@ -609,6 +677,7 @@ def mwrfits(filename,data,hdu=1,colnames=None,keys=None):
             tbhdu.header[k] = v
     # write the file
     writeto(tbhdu, filename)
+
 
 def getformat(t):
     """Get the FITS convention format string of data type t.

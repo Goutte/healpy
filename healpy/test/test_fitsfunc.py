@@ -8,6 +8,7 @@ import healpy
 from ..fitsfunc import *
 from ..sphtfunc import *
 
+
 class TestFitsFunc(unittest.TestCase):
 
     def setUp(self):
@@ -73,9 +74,28 @@ class TestFitsFunc(unittest.TestCase):
         m = self.m.astype(float)
         m[:11 * self.nside * self.nside] = UNSEEN
         write_map(self.filename, [m, m, m], partial=True)
-        read_m = read_map(self.filename,(0,1,2))
+        read_m = read_map(self.filename, field=(0, 1, 2))
         for rm in read_m:
             np.testing.assert_array_almost_equal(m, rm)
+
+    def test_read_write_partial_sparse_vector(self):
+        try:
+            from ..sparse_vector import SparseVector
+            import pandas
+        except ImportError as e:
+            print("To run the full test suite you need `sparse_list`.")
+            print(e)
+            return  # maybe fail ?
+
+        m = self.m.astype(float)
+        m[:11 * self.nside * self.nside] = UNSEEN
+
+        write_map(self.filename, m, partial=True)
+        read_m = read_map(self.filename, sparse=True, verbose=True)
+
+        # self.assertIsInstance(read_m, pandas.Series)
+        self.assertIsInstance(read_m, SparseVector)
+        np.testing.assert_array_almost_equal(m, read_m)
 
     def test_read_write_dtype(self):
         write_map(self.filename, self.m, dtype=np.float64)
@@ -98,7 +118,8 @@ class TestFitsFunc(unittest.TestCase):
             np.testing.assert_almost_equal(dtype(self.m), rm)
 
     def tearDown(self):
-        os.remove(self.filename)
+        if os.path.exists(self.filename):
+            os.remove(self.filename)
 
 
 class TestFitsFuncGzip(unittest.TestCase):
